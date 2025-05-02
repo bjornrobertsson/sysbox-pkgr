@@ -164,13 +164,13 @@ function deploy_kubelet_config_service() {
 
 	echo "Running Kubelet config agent on the host (will restart Kubelet and temporary bring down all pods on this node for ~1 min) ..."
 	systemctl daemon-reload
-	systemctl restart kubelet-config-helper.service
+	systemctl restart kubelet-config-helper.service || echo "Can fail, but we're ok with that"
 }
 
 function remove_kubelet_config_service() {
 	echo "Stopping the Kubelet config agent on the host ..."
-	systemctl stop kubelet-config-helper.service
-	systemctl disable kubelet-config-helper.service
+	systemctl stop kubelet-config-helper.service || echo "Not quite successful in stopping"
+	systemctl disable kubelet-config-helper.service || echo "Not quite successful in disabling"
 
 	echo "Removing Kubelet config agent from the host ..."
 	rm -f ${host_local_bin}/kubelet-config-helper.sh
@@ -275,6 +275,11 @@ function get_artifacts_dir() {
 		[[ "$distro" == "ubuntu-21.10" ]] ||
 		[[ "$distro" == "ubuntu-20.04" ]] ||
 		[[ "$distro" == "ubuntu-18.04" ]] ||
+		[[ "$distro" == "centos" ]] ||
+		[[ "$distro" == "centos-7" ]] ||
+		[[ "$distro" == "amzn" ]] ||
+		[[ "$distro" == "amzn-2" ]] ||
+		[[ "$distro" == "amzn-2023" ]] ||
 		[[ "$distro" =~ "debian" ]]; then
 		artifacts_dir="${sysbox_artifacts}/bin/generic"
 	elif [[ "$distro" =~ "flatcar" ]]; then
@@ -359,7 +364,7 @@ function rm_systemd_units_from_host() {
 function apply_sysbox_env_config() {
 	# Note: this requires CAP_SYS_ADMIN on the host
 	echo "Configuring host sysctls ..."
-	sysctl -p "${host_sysctl}/99-sysbox-sysctl.conf"
+	sysctl -p "${host_sysctl}/99-sysbox-sysctl.conf" || echo "If this shows up, userns may not be present in the host OS"
 }
 
 function start_sysbox() {
@@ -707,11 +712,23 @@ function get_container_runtime() {
 	fi
 }
 
+# function get_host_distro() {
+# 	local distro_name=$(grep -w "^ID" "$host_os_release" | cut -d "=" -f2)
+# 	local version_id=$(grep -w "^VERSION_ID" "$host_os_release" | cut -d "=" -f2 | tr -d '"')
+# 	echo "${distro_name}-${version_id}"
+# }
+
 function get_host_distro() {
-	local distro_name=$(grep -w "^ID" "$host_os_release" | cut -d "=" -f2)
-	local version_id=$(grep -w "^VERSION_ID" "$host_os_release" | cut -d "=" -f2 | tr -d '"')
-	echo "${distro_name}-${version_id}"
+    # Source the os-release file to make its variables available
+    source $host_os_release
+
+    # Retrieve distribution ID and VERSION_ID from the sourced file
+    local distro_name="${ID}"
+    local version_id="${VERSION_ID}"
+
+    echo "${distro_name}-${version_id}"
 }
+
 
 function get_sys_arch() {
 	local uname_m=$(uname -m)
@@ -747,6 +764,11 @@ function is_supported_distro() {
 		[[ "$distro" == "ubuntu-20.04" ]] ||
 		[[ "$distro" == "ubuntu-18.04" ]] ||
 		[[ "$distro" =~ "debian" ]] ||
+		[[ "$distro" =~ "amzn" ]] ||
+		[[ "$distro" =~ "amzn-2" ]] ||
+		[[ "$distro" =~ "centos" ]] ||
+		[[ "$distro" =~ "centos-7" ]] ||
+		[[ "$distro" =~ "amzn-2023" ]] ||
 		[[ "$distro" =~ "flatcar" ]]; then
 		return
 	fi
@@ -1066,7 +1088,9 @@ function do_distro_adjustments() {
 	sed -i '/^ExecStart=/ s@/usr/local/bin@/opt/local/bin@g' ${sysbox_artifacts}/systemd/sysbox-removal-helper.service
 
 	# Sysctl adjustments.
-	sed -i '/^kernel.unprivileged_userns_clone/ s/^#*/# /' ${sysbox_artifacts}/systemd/99-sysbox-sysctl.conf
+	if [[ ! ${distro} = "amzn" ]]; then
+	        sed -i '/^kernel.unprivileged_userns_clone/ s/^#*/# /' ${sysbox_artifacts}/systemd/99-sysbox-sysctl.conf
+	fi
 }
 
 # determines if running on a GKE cluster by checking metadata endpoint
@@ -1113,6 +1137,35 @@ function delete_sysbox_pods() {
 
 	set -e
 }
+
+check_and_restart_kubelet() {
+    # Check the status of the kubelet service
+    systemctl_status_exit_code=$(systemctl is-active kubelet)
+
+    if [ "$systemctl_status_exit_code" != "active" ]; then
+        echo "Kubelet is not active. Status: $systemctl_status_exit_code"
+
+        # Sleep for 5 seconds to allow any transient issues to resolve
+        sleep 5
+
+        # Attempt to restart the kubelet service
+        echo "Attempting to restart Kubelet..."
+        systemctl restart kubelet
+
+        # Check if the restart was successful
+        new_systemctl_status_exit_code=$(systemctl is-active kubelet)
+
+        if [ "$new_systemctl_status_exit_code" != "active" ]; then
+            echo "Failed to restart Kubelet. Status: $new_systemctl_status_exit_code"
+            # Optionally, you can add further logging or alerting here
+        else
+            echo "Kubelet successfully restarted."
+        fi
+    else
+        echo "Kubelet is active and running."
+    fi
+}
+
 
 #
 # Main Function
@@ -1328,10 +1381,13 @@ function main() {
 	# daemonset will restart and rexecute the script
 	echo "Done."
 
-	sleep infinity
+	# Call this function to trial the status of kubelet
+        check_and_restart_kubelet
+
+	while true ; do
+	 sleep 86400
+	 echo "Passed 1 day"
+	done
 }
 
 main "$@"
-
-
-
